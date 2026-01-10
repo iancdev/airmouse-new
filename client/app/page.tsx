@@ -11,6 +11,11 @@ type Enabled = {
 
 type ConnState = "disconnected" | "connecting" | "connected" | "error";
 
+type PreparedCamera = {
+  stream: MediaStream;
+  video: HTMLVideoElement;
+};
+
 function wsUrl(host: string, port: number) {
   const scheme = typeof location !== "undefined" && location.protocol === "https:" ? "wss" : "ws";
   return `${scheme}://${host}:${port}/ws`;
@@ -35,6 +40,7 @@ export default function Home() {
   const [connState, setConnState] = useState<ConnState>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const ioStopRef = useRef<(() => void) | null>(null);
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [cameraId, setCameraId] = useState<string>("");
@@ -77,27 +83,208 @@ export default function Home() {
     ws.send(JSON.stringify(obj));
   }
 
+  async function requestMotionPermissions() {
+    const anyWindow = window as any;
+    if (enabled.accel || enabled.gyro) {
+      const DME = anyWindow.DeviceMotionEvent;
+      if (DME && typeof DME.requestPermission === "function") {
+        const res = await DME.requestPermission();
+        if (res !== "granted") throw new Error("Motion permission was not granted");
+      }
+    }
+    if (enabled.orientation) {
+      const DOE = anyWindow.DeviceOrientationEvent;
+      if (DOE && typeof DOE.requestPermission === "function") {
+        const res = await DOE.requestPermission();
+        if (res !== "granted") throw new Error("Orientation permission was not granted");
+      }
+    }
+  }
+
+  function startImuStreaming(ws: WebSocket) {
+    if (!enabled.accel && !enabled.gyro && !enabled.orientation) return () => {};
+    const latest: Record<string, number> = {};
+
+    const onMotion = (e: DeviceMotionEvent) => {
+      latest.ts = Date.now();
+      if (enabled.accel) {
+        const a = e.acceleration ?? e.accelerationIncludingGravity;
+        if (a) {
+          if (typeof a.x === "number") latest.ax = a.x;
+          if (typeof a.y === "number") latest.ay = a.y;
+          if (typeof a.z === "number") latest.az = a.z;
+        }
+      }
+      if (enabled.gyro) {
+        const r = e.rotationRate;
+        if (r) {
+          if (typeof r.alpha === "number") latest.gx = r.alpha;
+          if (typeof r.beta === "number") latest.gy = r.beta;
+          if (typeof r.gamma === "number") latest.gz = r.gamma;
+        }
+      }
+    };
+
+    const onOrientation = (e: DeviceOrientationEvent) => {
+      if (!enabled.orientation) return;
+      latest.ts = Date.now();
+      if (typeof e.alpha === "number") latest.alpha = e.alpha;
+      if (typeof e.beta === "number") latest.beta = e.beta;
+      if (typeof e.gamma === "number") latest.gamma = e.gamma;
+    };
+
+    window.addEventListener("devicemotion", onMotion);
+    window.addEventListener("deviceorientation", onOrientation);
+
+    const intervalId = window.setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (typeof latest.ts !== "number") return;
+      sendJson({ t: "imu.sample", ...latest });
+    }, 33);
+
+    return () => {
+      window.removeEventListener("devicemotion", onMotion);
+      window.removeEventListener("deviceorientation", onOrientation);
+      window.clearInterval(intervalId);
+    };
+  }
+
+  function startCameraStreaming(ws: WebSocket, preparedCamera: PreparedCamera | null) {
+    if (!enabled.camera || !preparedCamera) return () => {};
+    const { stream, video } = preparedCamera;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas is not available");
+
+    let seq = 0;
+    let inFlight = false;
+    const intervalMs = Math.max(10, Math.round(1000 / cameraFps));
+
+    const intervalId = window.setInterval(() => {
+      if (inFlight) return;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+
+      const targetW = 320;
+      const targetH = Math.max(1, Math.round((vh / vw) * targetW));
+      canvas.width = targetW;
+      canvas.height = targetH;
+      ctx.drawImage(video, 0, 0, targetW, targetH);
+
+      inFlight = true;
+      canvas.toBlob(
+        async (blob) => {
+          try {
+            if (!blob) return;
+            const buf = await blob.arrayBuffer();
+            ws.send(
+              JSON.stringify({
+                t: "cam.frame",
+                seq,
+                ts: Date.now(),
+                width: targetW,
+                height: targetH,
+                mime: blob.type || "image/jpeg",
+              })
+            );
+            ws.send(buf);
+            seq += 1;
+          } finally {
+            inFlight = false;
+          }
+        },
+        "image/jpeg",
+        0.6
+      );
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(intervalId);
+      stream.getTracks().forEach((t) => t.stop());
+      video.srcObject = null;
+    };
+  }
+
+  function startIo(ws: WebSocket, preparedCamera: PreparedCamera | null) {
+    const stops: Array<() => void> = [];
+    stops.push(startImuStreaming(ws));
+    stops.push(startCameraStreaming(ws, preparedCamera));
+    return () => {
+      for (const stop of stops) stop();
+    };
+  }
+
   async function connect() {
     setError(null);
     setConnState("connecting");
+
+    ioStopRef.current?.();
+    ioStopRef.current = null;
+
+    let preparedCamera: PreparedCamera | null = null;
+    try {
+      await requestMotionPermissions();
+      if (enabled.camera) {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera API not available in this browser");
+        const constraints: MediaStreamConstraints = {
+          audio: false,
+          video: {
+            deviceId: cameraId ? { exact: cameraId } : undefined,
+            facingMode: "environment",
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: cameraFps },
+          },
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const video = document.createElement("video");
+        video.playsInline = true;
+        video.muted = true;
+        video.srcObject = stream;
+        await video.play();
+        preparedCamera = { stream, video };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to get permissions";
+      setError(msg);
+      setConnState("error");
+      preparedCamera?.stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
     const url = wsUrl(host, port);
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      sendJson({ t: "hello", clientVersion: "0.1.0", device: navigator.userAgent });
-      sendJson({ t: "config", sensitivity, cameraFps, enabled });
-      setConnState("connected");
+      try {
+        sendJson({ t: "hello", clientVersion: "0.1.0", device: navigator.userAgent });
+        sendJson({ t: "config", sensitivity, cameraFps, enabled });
+
+        ioStopRef.current = startIo(ws, preparedCamera);
+        setConnState("connected");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to start sensors/camera";
+        setError(msg);
+        setConnState("error");
+        ws.close();
+      }
     };
 
     ws.onclose = () => {
       wsRef.current = null;
+      ioStopRef.current?.();
+      ioStopRef.current = null;
+      preparedCamera?.stream.getTracks().forEach((t) => t.stop());
       setConnState("disconnected");
     };
 
     ws.onerror = () => {
       setConnState("error");
       setError("WebSocket error. Check host/port and that the server is reachable.");
+      preparedCamera?.stream.getTracks().forEach((t) => t.stop());
     };
 
     ws.onmessage = (evt) => {
@@ -111,6 +298,8 @@ export default function Home() {
   }
 
   function disconnect() {
+    ioStopRef.current?.();
+    ioStopRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
     setConnState("disconnected");
@@ -412,4 +601,3 @@ export default function Home() {
     </main>
   );
 }
-

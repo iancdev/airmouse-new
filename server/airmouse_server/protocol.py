@@ -41,7 +41,30 @@ class MoveDeltaMsg(TypedDict):
     dy: float
 
 
-ClientMsg = HelloMsg | ConfigMsg | ClickMsg | ScrollMsg | MoveDeltaMsg
+class ImuSampleMsg(TypedDict, total=False):
+    t: Literal["imu.sample"]
+    ts: float
+    ax: float
+    ay: float
+    az: float
+    gx: float
+    gy: float
+    gz: float
+    alpha: float
+    beta: float
+    gamma: float
+
+
+class CamFrameMetaMsg(TypedDict):
+    t: Literal["cam.frame"]
+    seq: int
+    ts: float
+    width: int
+    height: int
+    mime: str
+
+
+ClientMsg = HelloMsg | ConfigMsg | ClickMsg | ScrollMsg | MoveDeltaMsg | ImuSampleMsg | CamFrameMetaMsg
 
 
 @dataclass
@@ -57,4 +80,3 @@ def parse_client_msg(payload: Any) -> ParsedMsg:
     if not isinstance(msg_type, str):
         raise ValueError("Missing or invalid 't' field")
     return ParsedMsg(t=msg_type, raw=payload)
-
