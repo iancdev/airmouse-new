@@ -261,7 +261,13 @@ export default function Home() {
     ws.onopen = () => {
       try {
         sendJson({ t: "hello", clientVersion: "0.1.0", device: navigator.userAgent });
-        sendJson({ t: "config", sensitivity, cameraFps, enabled });
+        sendJson({
+          t: "config",
+          sensitivity,
+          cameraFps,
+          enabled,
+          screenAngle: window.screen?.orientation?.angle ?? 0,
+        });
 
         ioStopRef.current = startIo(ws, preparedCamera);
         setConnState("connected");

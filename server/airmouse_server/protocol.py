@@ -22,6 +22,7 @@ class ConfigMsg(TypedDict):
     sensitivity: float
     cameraFps: int
     enabled: ClientEnabled
+    screenAngle: int
 
 
 class ClickMsg(TypedDict):

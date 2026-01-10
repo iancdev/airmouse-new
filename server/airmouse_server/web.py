@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,12 +13,15 @@ import numpy as np
 
 from .mouse import MouseConfig, MouseController
 from .protocol import parse_client_msg
-from .imu import ImuTracker
+from .consensus import majority_validate_direction
+from .imu import AccelTracker, GyroTracker, MotionDelta, OrientationTracker
 from .vision import VisionTracker
 
 logger = logging.getLogger("airmouse")
 
 DEFAULT_ENABLED = {"camera": False, "accel": True, "gyro": False, "orientation": False}
+MOVE_SCALES = {"camera": 4.0, "accel": 220.0, "gyro": 18.0, "orientation": 4.0}
+MAX_MOVE_PER_EVENT = 120.0
 
 def create_app(*, static_dir: Path | None) -> FastAPI:
     app = FastAPI(title="AirMouse")
@@ -70,14 +74,57 @@ def create_app(*, static_dir: Path | None) -> FastAPI:
     return app
 
 
+def _scale_move(source: str, delta: MotionDelta, sensitivity: float) -> tuple[float, float]:
+    scale = MOVE_SCALES.get(source, 1.0)
+    dx = delta.dx * scale * sensitivity
+    dy = delta.dy * scale * sensitivity
+    dx = max(-MAX_MOVE_PER_EVENT, min(MAX_MOVE_PER_EVENT, dx))
+    dy = max(-MAX_MOVE_PER_EVENT, min(MAX_MOVE_PER_EVENT, dy))
+    return dx, dy
+
+
+def _select_primary_imu(session: "ClientSession") -> tuple[str, MotionDelta] | None:
+    for source in ("accel", "orientation", "gyro"):
+        if not session.enabled.get(source):
+            continue
+        delta = session.last.get(source)
+        if delta is not None and delta.valid:
+            return source, delta
+    return None
+
+
+def _rotate(delta: MotionDelta, screen_angle_deg: int) -> MotionDelta:
+    angle = screen_angle_deg % 360
+    if angle == 0 or not delta.valid:
+        return delta
+
+    dx, dy = delta.dx, delta.dy
+    if angle == 90:
+        dx, dy = -dy, dx
+    elif angle == 180:
+        dx, dy = -dx, -dy
+    elif angle == 270:
+        dx, dy = dy, -dx
+    else:
+        rad = math.radians(angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        dx, dy = (dx * cos_a - dy * sin_a), (dx * sin_a + dy * cos_a)
+    return MotionDelta(dx=dx, dy=dy, ts_ms=delta.ts_ms, valid=delta.valid)
+
+
 @dataclass
 class ClientSession:
     sensitivity: float = 1.0
     camera_fps: int = 15
+    screen_angle_deg: int = 0
     enabled: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_ENABLED))
     pending_frame_meta: dict | None = None
     vision: VisionTracker = field(default_factory=VisionTracker)
-    imu: ImuTracker = field(default_factory=ImuTracker)
+    accel: AccelTracker = field(default_factory=AccelTracker)
+    gyro: GyroTracker = field(default_factory=GyroTracker)
+    orientation: OrientationTracker = field(default_factory=OrientationTracker)
+    last: dict[str, MotionDelta] = field(default_factory=dict)
 
 
 async def _handle_text_message(
@@ -96,6 +143,10 @@ async def _handle_text_message(
     if msg.t == "config":
         session.sensitivity = float(msg.raw.get("sensitivity", 1.0))
         session.camera_fps = int(msg.raw.get("cameraFps", session.camera_fps))
+        try:
+            session.screen_angle_deg = int(msg.raw.get("screenAngle", 0)) % 360
+        except (TypeError, ValueError):
+            session.screen_angle_deg = 0
 
         enabled = msg.raw.get("enabled")
         if isinstance(enabled, dict):
@@ -107,7 +158,10 @@ async def _handle_text_message(
         mouse.update_config(MouseConfig(move_scale=session.sensitivity, scroll_scale=session.sensitivity))
         session.pending_frame_meta = None
         session.vision.reset()
-        session.imu.reset()
+        session.accel.reset()
+        session.gyro.reset()
+        session.orientation.reset()
+        session.last.clear()
         await ws.send_text(json.dumps({"t": "server.state", "configured": True}))
         return
 
@@ -127,9 +181,33 @@ async def _handle_text_message(
 
     if msg.t == "imu.sample":
         if session.enabled.get("accel"):
-            delta = session.imu.process_sample(msg.raw)
-            if delta.valid:
-                mouse.move_relative(delta.dx * session.sensitivity, delta.dy * session.sensitivity)
+            delta = session.accel.process_sample(msg.raw)
+            session.last["accel"] = _rotate(delta, session.screen_angle_deg)
+        if session.enabled.get("gyro"):
+            delta = session.gyro.process_sample(msg.raw)
+            session.last["gyro"] = _rotate(delta, session.screen_angle_deg)
+        if session.enabled.get("orientation"):
+            delta = session.orientation.process_sample(msg.raw)
+            session.last["orientation"] = _rotate(delta, session.screen_angle_deg)
+
+        # If camera is enabled, treat IMU sources as validators only.
+        if session.enabled.get("camera"):
+            return
+
+        primary = _select_primary_imu(session)
+        if primary is None:
+            return
+        source, primary_delta = primary
+        validators = [
+            session.last.get("accel"),
+            session.last.get("gyro"),
+            session.last.get("orientation"),
+        ]
+        validators = [v for v in validators if v is not None and v is not primary_delta]
+        vote = majority_validate_direction(primary=primary_delta, validators=validators)
+        if vote.ok:
+            dx, dy = _scale_move(source, primary_delta, session.sensitivity)
+            mouse.move_relative(dx, dy)
         return
 
     if msg.t == "cam.frame":
@@ -153,6 +231,12 @@ async def _handle_binary_message(
     if not isinstance(meta, dict):
         return
 
+    ts = meta.get("ts")
+    try:
+        ts_ms = float(ts) if ts is not None else 0.0
+    except (TypeError, ValueError):
+        ts_ms = 0.0
+
     mime = meta.get("mime")
     if not isinstance(mime, str) or not mime.startswith("image/"):
         return
@@ -163,10 +247,22 @@ async def _handle_binary_message(
         return
 
     delta = session.vision.process_bgr(frame)
-    if not delta.valid:
+    cam_delta = MotionDelta(dx=delta.dx, dy=delta.dy, ts_ms=ts_ms, valid=delta.valid)
+    session.last["camera"] = cam_delta
+    if not cam_delta.valid:
         return
 
-    # Heuristic scaling: the vision delta is in downscaled pixels.
-    dx = delta.dx * 4.0 * session.sensitivity
-    dy = delta.dy * 4.0 * session.sensitivity
+    validators: list[MotionDelta] = []
+    if session.enabled.get("accel") and (d := session.last.get("accel")) is not None:
+        validators.append(d)
+    if session.enabled.get("gyro") and (d := session.last.get("gyro")) is not None:
+        validators.append(d)
+    if session.enabled.get("orientation") and (d := session.last.get("orientation")) is not None:
+        validators.append(d)
+
+    vote = majority_validate_direction(primary=cam_delta, validators=validators)
+    if not vote.ok:
+        return
+
+    dx, dy = _scale_move("camera", cam_delta, session.sensitivity)
     mouse.move_relative(dx, dy)
