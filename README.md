@@ -36,14 +36,11 @@ Then tap “Connect”.
 
 Most browsers require a secure context for `getUserMedia()` (camera). iOS also requires explicit motion/orientation permission prompts.
 
-Run the server with HTTPS/WSS:
+Easiest dev option (auto-generates a local CA + server cert):
 
-- Generate a cert (recommended: `mkcert`), or quick self-signed:
-  - `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=<computer-ip>"`
-- Start:
-  - `python -m airmouse_server --static-dir ../client/out --ssl-keyfile key.pem --ssl-certfile cert.pem`
+- `python -m airmouse_server --static-dir ../client/out --dev-ssl`
 
-Then open `https://<computer-ip>:8000/` on your phone.
+This writes certs to `server/.certs/` and prints the CA cert path. Install/trust that CA cert on your phone, then open `https://<computer-ip>:8000/`.
 
 ## Notes
 

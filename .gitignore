@@ -27,3 +27,5 @@ out/
 .env
 .env.*
 
+# Dev certificates (do not commit private keys)
+server/.certs/
