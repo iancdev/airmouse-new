@@ -1,0 +1,4 @@
+# AirMouse Client
+
+Next.js web client intended to run in a mobile browser.
+
