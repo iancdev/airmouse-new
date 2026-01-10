@@ -23,6 +23,8 @@ class ConfigMsg(TypedDict):
     cameraFps: int
     enabled: ClientEnabled
     screenAngle: int
+    smoothingHalfLifeMs: float
+    deadzonePx: float
 
 
 class ClickMsg(TypedDict):

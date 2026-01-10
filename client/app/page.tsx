@@ -30,6 +30,8 @@ export default function Home() {
   const [port, setPort] = useState(8000);
   const [sensitivity, setSensitivity] = useState(1);
   const [cameraFps, setCameraFps] = useState(15);
+  const [smoothingHalfLifeMs, setSmoothingHalfLifeMs] = useState(80);
+  const [deadzonePx, setDeadzonePx] = useState(0.25);
   const [enabled, setEnabled] = useState<Enabled>({
     camera: false,
     accel: true,
@@ -267,6 +269,8 @@ export default function Home() {
           cameraFps,
           enabled,
           screenAngle: window.screen?.orientation?.angle ?? 0,
+          smoothingHalfLifeMs,
+          deadzonePx,
         });
 
         ioStopRef.current = startIo(ws, preparedCamera);
@@ -444,6 +448,30 @@ export default function Home() {
                 step={1}
               />
               <span style={{ color: "var(--muted)", fontSize: 12 }}>{cameraFps} fps</span>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>Smoothing</span>
+              <input
+                value={smoothingHalfLifeMs}
+                onChange={(e) => setSmoothingHalfLifeMs(Number(e.target.value))}
+                type="range"
+                min={0}
+                max={250}
+                step={5}
+              />
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>{smoothingHalfLifeMs} ms</span>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>Deadzone</span>
+              <input
+                value={deadzonePx}
+                onChange={(e) => setDeadzonePx(Number(e.target.value))}
+                type="range"
+                min={0}
+                max={3}
+                step={0.05}
+              />
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>{deadzonePx.toFixed(2)} px</span>
             </label>
           </div>
 
