@@ -22,7 +22,7 @@ Use a phone (iOS/Android) as a desk-surface mouse by streaming sensor + camera d
 - `python3 -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements.txt`
 
-3) Run the server (serves the client at `/app/`):
+3) Run the server (serves the client at `/`):
 
 - `python -m airmouse_server --static-dir ../client/out --host 0.0.0.0 --port 8000`
 
@@ -30,7 +30,7 @@ Use a phone (iOS/Android) as a desk-surface mouse by streaming sensor + camera d
 
 - `http://<computer-ip>:8000/`
 
-Then tap “Open AirMouse” → “Connect”.
+Then tap “Connect”.
 
 ## HTTPS (recommended for camera + iOS sensors)
 

@@ -26,29 +26,6 @@ MAX_MOVE_PER_EVENT = 120.0
 def create_app(*, static_dir: Path | None) -> FastAPI:
     app = FastAPI(title="AirMouse")
 
-    if static_dir is not None and static_dir.exists():
-        app.mount("/app", StaticFiles(directory=str(static_dir), html=True), name="app")
-
-        @app.get("/", response_class=HTMLResponse)
-        async def root() -> str:
-            return (
-                "<!doctype html><html><head><meta charset='utf-8'/>"
-                "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-                "<title>AirMouse</title></head>"
-                "<body><a href='/app/'>Open AirMouse</a></body></html>"
-            )
-
-    else:
-
-        @app.get("/", response_class=HTMLResponse)
-        async def root() -> str:
-            return (
-                "<!doctype html><html><head><meta charset='utf-8'/>"
-                "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-                "<title>AirMouse</title></head>"
-                "<body><h1>AirMouse server</h1><p>Build the client and pass --static-dir.</p></body></html>"
-            )
-
     mouse = MouseController()
 
     @app.websocket("/ws")
@@ -70,6 +47,20 @@ def create_app(*, static_dir: Path | None) -> FastAPI:
                 await ws.send_text(json.dumps({"t": "error", "message": str(exc)}))
             except Exception:
                 pass
+
+    if static_dir is not None and static_dir.exists():
+        # Next.js static export expects to be served at the origin root.
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="app")
+    else:
+
+        @app.get("/", response_class=HTMLResponse)
+        async def root() -> str:
+            return (
+                "<!doctype html><html><head><meta charset='utf-8'/>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+                "<title>AirMouse</title></head>"
+                "<body><h1>AirMouse server</h1><p>Build the client and pass --static-dir.</p></body></html>"
+            )
 
     return app
 
