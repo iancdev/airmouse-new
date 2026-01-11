@@ -25,6 +25,32 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+type TorchSupport = boolean | null; // null = unknown (not checked yet)
+
+function getTorchSupport(track: MediaStreamTrack): TorchSupport {
+  try {
+    const caps = (track.getCapabilities?.() ?? {}) as any;
+    if (typeof caps.torch === "boolean") return caps.torch;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function setTorchEnabled(track: MediaStreamTrack, enabled: boolean): Promise<boolean> {
+  if (track.readyState === "ended") return false;
+
+  const support = getTorchSupport(track);
+  if (support === false) return false;
+
+  try {
+    await track.applyConstraints({ advanced: [{ torch: enabled }] } as any);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export default function Home() {
   const [host, setHost] = useState("");
   const [port, setPort] = useState(8000);
@@ -38,11 +64,14 @@ export default function Home() {
     gyro: false,
     orientation: false,
   });
+  const [flashlightEnabled, setFlashlightEnabled] = useState(false);
+  const [torchSupported, setTorchSupported] = useState<TorchSupport>(null);
 
   const [connState, setConnState] = useState<ConnState>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ioStopRef = useRef<(() => void) | null>(null);
+  const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [cameraId, setCameraId] = useState<string>("");
@@ -57,6 +86,16 @@ export default function Home() {
     if (typeof location === "undefined") return;
     setHost(location.hostname || "localhost");
   }, []);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    const track = cameraTrackRef.current;
+    if (!track) return;
+    void (async () => {
+      const ok = await setTorchEnabled(track, flashlightEnabled);
+      if (flashlightEnabled) setTorchSupported(ok);
+    })();
+  }, [isConnected, flashlightEnabled]);
 
   const canEnumerate = typeof navigator !== "undefined" && !!navigator.mediaDevices?.enumerateDevices;
 
@@ -210,6 +249,8 @@ export default function Home() {
 
     return () => {
       window.clearInterval(intervalId);
+      const track = stream.getVideoTracks()[0];
+      if (track) void setTorchEnabled(track, false);
       stream.getTracks().forEach((t) => t.stop());
       video.srcObject = null;
     };
@@ -230,6 +271,8 @@ export default function Home() {
 
     ioStopRef.current?.();
     ioStopRef.current = null;
+    cameraTrackRef.current = null;
+    setTorchSupported(null);
 
     let preparedCamera: PreparedCamera | null = null;
     try {
@@ -247,18 +290,30 @@ export default function Home() {
           },
         };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const track = stream.getVideoTracks()[0] ?? null;
+        cameraTrackRef.current = track;
+        if (track) {
+          const support = getTorchSupport(track);
+          if (support !== null) setTorchSupported(support);
+          if (flashlightEnabled) {
+            const ok = await setTorchEnabled(track, true);
+            if (support === null) setTorchSupported(ok);
+          }
+        }
         const video = document.createElement("video");
         video.playsInline = true;
         video.muted = true;
         video.srcObject = stream;
-        await video.play();
         preparedCamera = { stream, video };
+        await video.play();
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to get permissions";
       setError(msg);
       setConnState("error");
       preparedCamera?.stream.getTracks().forEach((t) => t.stop());
+      cameraTrackRef.current = null;
+      setTorchSupported(null);
       return;
     }
 
@@ -293,6 +348,8 @@ export default function Home() {
       wsRef.current = null;
       ioStopRef.current?.();
       ioStopRef.current = null;
+      cameraTrackRef.current = null;
+      setTorchSupported(null);
       preparedCamera?.stream.getTracks().forEach((t) => t.stop());
       setConnState("disconnected");
     };
@@ -301,6 +358,8 @@ export default function Home() {
       setConnState("error");
       setError("WebSocket error. Check host/port and that the server is reachable.");
       preparedCamera?.stream.getTracks().forEach((t) => t.stop());
+      cameraTrackRef.current = null;
+      setTorchSupported(null);
     };
 
     ws.onmessage = (evt) => {
@@ -318,6 +377,8 @@ export default function Home() {
     ioStopRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
+    cameraTrackRef.current = null;
+    setTorchSupported(null);
     setConnState("disconnected");
   }
 
@@ -566,6 +627,34 @@ export default function Home() {
               <div>
                 <div style={{ fontWeight: 600 }}>Mirror camera (Y-axis)</div>
                 <div style={{ color: "var(--muted)", fontSize: 12 }}>Flip left/right for camera tracking</div>
+              </div>
+            </label>
+            <label
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "center",
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid var(--border)",
+                opacity: enabled.camera ? 1 : 0.6,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={flashlightEnabled}
+                onChange={(e) => setFlashlightEnabled(e.target.checked)}
+                disabled={!enabled.camera}
+              />
+              <div>
+                <div style={{ fontWeight: 600 }}>Flashlight</div>
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                  {!enabled.camera
+                    ? "Enable Camera to use flashlight"
+                    : torchSupported === false
+                      ? "Not supported on this device/browser"
+                      : "Turns on your phone LED while connected"}
+                </div>
               </div>
             </label>
           </div>
