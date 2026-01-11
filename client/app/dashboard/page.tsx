@@ -60,7 +60,7 @@ export default function Dashboard() {
     return () => {
       ws.close();
     };
-  }, [state.session_id]);
+  }, [state.session_id, state.local_ip]);
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-200 p-8 font-sans">
