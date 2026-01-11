@@ -315,6 +315,8 @@ async def _handle_text_message(
         if session.enabled.get("accel"):
             delta = session.accel.process_sample(msg.raw)
             delta = _rotate(delta, session.screen_angle_deg)
+            # Cursor coordinates use +Y = down; device acceleration uses +Y = up.
+            delta = MotionDelta(dx=delta.dx, dy=-delta.dy, ts_ms=delta.ts_ms, valid=delta.valid)
             session.last["accel"] = delta
             if delta.valid:
                 dx, dy = _scale_move("accel", delta)

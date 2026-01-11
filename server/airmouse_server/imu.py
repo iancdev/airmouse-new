@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass(frozen=True)
@@ -22,17 +23,34 @@ def _parse_ts_ms(sample: dict) -> float | None:
 
 
 class AccelTracker:
-    def __init__(self, *, accel_gain: float = 120.0, friction: float = 0.86) -> None:
+    def __init__(
+        self,
+        *,
+        accel_gain: float = 120.0,
+        friction: float = 0.86,
+        hp_tau_s: float = 0.35,
+        deadzone_mps2: float = 0.08,
+    ) -> None:
         self._accel_gain = accel_gain
         self._friction = friction
+        self._hp_tau_s = hp_tau_s
+        self._deadzone_mps2 = deadzone_mps2
         self._vx = 0.0
         self._vy = 0.0
         self._last_ts_ms: float | None = None
+        self._prev_ax: float | None = None
+        self._prev_ay: float | None = None
+        self._hp_ax = 0.0
+        self._hp_ay = 0.0
 
     def reset(self) -> None:
         self._vx = 0.0
         self._vy = 0.0
         self._last_ts_ms = None
+        self._prev_ax = None
+        self._prev_ay = None
+        self._hp_ax = 0.0
+        self._hp_ay = 0.0
 
     def process_sample(self, sample: dict) -> MotionDelta:
         ts_ms = _parse_ts_ms(sample)
@@ -49,15 +67,56 @@ class AccelTracker:
 
         if self._last_ts_ms is None:
             self._last_ts_ms = ts_ms
+            self._prev_ax = ax_f
+            self._prev_ay = ay_f
             return MotionDelta(dx=0.0, dy=0.0, ts_ms=ts_ms, valid=False)
 
         dt = (ts_ms - self._last_ts_ms) / 1000.0
         self._last_ts_ms = ts_ms
         if dt <= 0 or dt > 0.2:
+            self._vx = 0.0
+            self._vy = 0.0
+            self._prev_ax = ax_f
+            self._prev_ay = ay_f
+            self._hp_ax = 0.0
+            self._hp_ay = 0.0
             return MotionDelta(dx=0.0, dy=0.0, ts_ms=ts_ms, valid=False)
 
-        self._vx = (self._vx * self._friction) + (ax_f * dt * self._accel_gain)
-        self._vy = (self._vy * self._friction) + (ay_f * dt * self._accel_gain)
+        if self._prev_ax is None or self._prev_ay is None:
+            self._prev_ax = ax_f
+            self._prev_ay = ay_f
+            return MotionDelta(dx=0.0, dy=0.0, ts_ms=ts_ms, valid=False)
+
+        # If we only have accelerationIncludingGravity (common on iOS), it contains a large DC
+        # gravity component and slow tilt drift. High-pass filtering greatly reduces cursor
+        # jitter/drift by removing those low-frequency components before integration.
+        ax_in = ax_f
+        ay_in = ay_f
+        if self._hp_tau_s > 0:
+            alpha = self._hp_tau_s / (self._hp_tau_s + dt)
+            self._hp_ax = alpha * (self._hp_ax + ax_f - self._prev_ax)
+            self._hp_ay = alpha * (self._hp_ay + ay_f - self._prev_ay)
+            ax_in = self._hp_ax
+            ay_in = self._hp_ay
+
+        self._prev_ax = ax_f
+        self._prev_ay = ay_f
+
+        if self._deadzone_mps2 > 0 and math.hypot(ax_in, ay_in) < self._deadzone_mps2:
+            ax_in = 0.0
+            ay_in = 0.0
+
+        # Apply damping, but don't allow the velocity estimate to "bounce" past zero due
+        # to the friction term (which can double-count deceleration and produce a small
+        # reversal at the end of a movement).
+        prev_vx = self._vx
+        prev_vy = self._vy
+        self._vx = (self._vx * self._friction) + (ax_in * dt * self._accel_gain)
+        self._vy = (self._vy * self._friction) + (ay_in * dt * self._accel_gain)
+        if prev_vx != 0.0 and (prev_vx > 0.0) != (self._vx > 0.0):
+            self._vx = 0.0
+        if prev_vy != 0.0 and (prev_vy > 0.0) != (self._vy > 0.0):
+            self._vy = 0.0
         return MotionDelta(dx=self._vx * dt, dy=self._vy * dt, ts_ms=ts_ms, valid=True)
 
 
@@ -97,8 +156,14 @@ class GyroTracker:
             return MotionDelta(dx=0.0, dy=0.0, ts_ms=ts_ms, valid=False)
 
         # RotationRate is in deg/s. Use as a directional validator / rough movement.
+        prev_vx = self._vx
+        prev_vy = self._vy
         self._vx = (self._vx * self._friction) + (gz_f * dt * self._gyro_gain)
         self._vy = (self._vy * self._friction) + (gy_f * dt * self._gyro_gain)
+        if prev_vx != 0.0 and (prev_vx > 0.0) != (self._vx > 0.0):
+            self._vx = 0.0
+        if prev_vy != 0.0 and (prev_vy > 0.0) != (self._vy > 0.0):
+            self._vy = 0.0
         return MotionDelta(dx=self._vx * dt, dy=self._vy * dt, ts_ms=ts_ms, valid=True)
 
 
