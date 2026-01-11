@@ -26,7 +26,7 @@ class AccelTracker:
     def __init__(
         self,
         *,
-        accel_gain: float = 180.0, #120.0
+        accel_gain: float = 50.0, #120.0
         friction: float = 0.8, #0.86
         hp_tau_s: float = 0.35,
         deadzone_mps2: float = 0.08,

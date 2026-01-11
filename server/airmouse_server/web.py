@@ -172,9 +172,9 @@ def _stop_motion_thread(session: ClientSession) -> None:
 
 def _motion_loop(mouse: MouseController, session: ClientSession) -> None:
     last_tick = time.monotonic()
-    interval = 1.0 / max(1.0, float(session.tick_hz))
 
     while not session.stop_event.is_set():
+        interval = 1.0 / max(1.0, float(session.tick_hz))
         now = time.monotonic()
         dt = now - last_tick
         if dt < interval:
@@ -219,7 +219,7 @@ async def _handle_text_message(
 
     if msg.t == "config":
         session.sensitivity = float(msg.raw.get("sensitivity", 1.0))
-        session.camera_fps = int(msg.raw.get("cameraFps", session.camera_fps))
+        session.camera_fps = max(1, min(240, int(msg.raw.get("cameraFps", session.camera_fps))))
         try:
             session.screen_angle_deg = int(msg.raw.get("screenAngle", 0)) % 360
         except (TypeError, ValueError):
@@ -239,6 +239,11 @@ async def _handle_text_message(
                 val = enabled.get(key)
                 if isinstance(val, bool):
                     session.enabled[key] = val
+
+        # Keep the motion loop aligned to the camera send rate when using vision, so camera
+        # deltas are applied as they arrive (up to 240Hz from the client).
+        if session.enabled.get("camera", False):
+            session.tick_hz = float(session.camera_fps)
 
         fusion_raw = msg.raw.get("fusion")
         if isinstance(fusion_raw, dict):
