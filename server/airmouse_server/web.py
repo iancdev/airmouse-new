@@ -15,9 +15,9 @@ import numpy as np
 
 from .mouse import MouseController
 from .protocol import parse_client_msg
-from .consensus import majority_validate_direction
 from .imu import AccelTracker, GyroTracker, MotionDelta, OrientationTracker
 from .smoothing import MotionSmoother, SmoothingConfig
+from .fusion import FusionConfig, compute_raw_delta
 from .vision import VisionTracker
 
 logger = logging.getLogger("airmouse")
@@ -121,7 +121,10 @@ class ClientSession:
     accel: AccelTracker = field(default_factory=AccelTracker)
     gyro: GyroTracker = field(default_factory=GyroTracker)
     orientation: OrientationTracker = field(default_factory=OrientationTracker)
+    # Last per-source motion deltas (already rotated + scaled into "mouse space"),
+    # timestamped with server monotonic time (ms) for consistent freshness checks.
     last: dict[str, MotionDelta] = field(default_factory=dict)
+    fusion: FusionConfig = field(default_factory=FusionConfig, repr=False)
     pending: dict[str, tuple[float, float]] = field(default_factory=dict, repr=False)
     pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -183,7 +186,14 @@ def _motion_loop(mouse: MouseController, session: ClientSession) -> None:
             deltas = session.pending
             session.pending = {}
 
-        raw_dx, raw_dy = _compute_raw_delta(session, deltas)
+        raw_dx, raw_dy = compute_raw_delta(
+            pending=deltas,
+            enabled=session.enabled,
+            last_motion=session.last,
+            last_out=(session.last_out_dx, session.last_out_dy),
+            now_ms=now * 1000.0,
+            config=session.fusion,
+        )
         dx = raw_dx * session.sensitivity
         dy = raw_dy * session.sensitivity
         dx, dy = session.smoother.apply(dx, dy, dt_s=dt)
@@ -192,54 +202,6 @@ def _motion_loop(mouse: MouseController, session: ClientSession) -> None:
             session.last_out_dx = dx
             session.last_out_dy = dy
             mouse.move_relative(dx, dy)
-
-
-def _compute_raw_delta(session: ClientSession, deltas: dict[str, tuple[float, float]]) -> tuple[float, float]:
-    now_ms = time.time() * 1000.0
-
-    motions: dict[str, MotionDelta] = {}
-    for source, (dx, dy) in deltas.items():
-        if dx == 0 and dy == 0:
-            continue
-        motions[source] = MotionDelta(dx=dx, dy=dy, ts_ms=now_ms, valid=True)
-
-    if not motions:
-        return 0.0, 0.0
-
-    priority = ["camera", "delta", "accel", "orientation", "gyro"]
-    primary_source = next((s for s in priority if s in motions), next(iter(motions.keys())))
-    primary = motions[primary_source]
-    validators = [v for s, v in motions.items() if s != primary_source]
-
-    if primary_source == "camera" and not session.enabled.get("camera"):
-        return 0.0, 0.0
-
-    if primary_source in DEFAULT_ENABLED and not session.enabled.get(primary_source, False):
-        return 0.0, 0.0
-
-    if len(validators) >= 2:
-        vote = majority_validate_direction(primary=primary, validators=validators)
-        if not vote.ok:
-            return 0.0, 0.0
-        return primary.dx, primary.dy
-
-    if len(validators) == 1:
-        vote = majority_validate_direction(primary=primary, validators=validators)
-        if vote.ok:
-            return primary.dx, primary.dy
-
-        prev_dx = session.last_out_dx
-        prev_dy = session.last_out_dy
-        if prev_dx == 0 and prev_dy == 0:
-            return primary.dx * 0.35, primary.dy * 0.35
-
-        prev = MotionDelta(dx=prev_dx, dy=prev_dy, ts_ms=now_ms, valid=True)
-        tie = majority_validate_direction(primary=primary, validators=[prev], max_age_ms=10_000.0)
-        if tie.ok:
-            return primary.dx, primary.dy
-        return primary.dx * 0.35, primary.dy * 0.35
-
-    return primary.dx, primary.dy
 
 
 async def _handle_text_message(
@@ -278,6 +240,39 @@ async def _handle_text_message(
                 if isinstance(val, bool):
                     session.enabled[key] = val
 
+        fusion_raw = msg.raw.get("fusion")
+        if isinstance(fusion_raw, dict):
+            def _bool(key: str, default: bool) -> bool:
+                val = fusion_raw.get(key)
+                return val if isinstance(val, bool) else default
+
+            def _float(key: str, default: float) -> float:
+                val = fusion_raw.get(key)
+                if val is None:
+                    return default
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return default
+
+            session.fusion = FusionConfig(
+                camera_gate_enabled=_bool("cameraGateEnabled", session.fusion.camera_gate_enabled),
+                camera_max_age_ms=_float("cameraMaxAgeMs", session.fusion.camera_max_age_ms),
+                camera_still_px=_float("cameraStillPx", session.fusion.camera_still_px),
+                camera_validator_min_px=_float("cameraValidatorMinPx", session.fusion.camera_validator_min_px),
+                imu_min_px_when_camera_still=_float(
+                    "imuMinPxWhenCameraStill",
+                    session.fusion.imu_min_px_when_camera_still,
+                ),
+                imu_opposite_max_px_when_camera_still=_float(
+                    "imuOppositeMaxPxWhenCameraStill",
+                    session.fusion.imu_opposite_max_px_when_camera_still,
+                ),
+                max_angle_deg=_float("maxAngleDeg", session.fusion.max_angle_deg),
+                min_mag=_float("minMag", session.fusion.min_mag),
+                weak_fallback_scale=_float("weakFallbackScale", session.fusion.weak_fallback_scale),
+            )
+
         session.smoother.update_config(
             SmoothingConfig(
                 half_life_ms=max(0.0, smoothing_ms),
@@ -312,29 +307,36 @@ async def _handle_text_message(
         return
 
     if msg.t == "imu.sample":
+        rx_ms = time.monotonic() * 1000.0
         if session.enabled.get("accel"):
             delta = session.accel.process_sample(msg.raw)
             delta = _rotate(delta, session.screen_angle_deg)
             # Cursor coordinates use +Y = down; apply axis sign corrections for expected feel.
             delta = MotionDelta(dx=-delta.dx, dy=delta.dy, ts_ms=delta.ts_ms, valid=delta.valid)
-            session.last["accel"] = delta
             if delta.valid:
                 dx, dy = _scale_move("accel", delta)
+                session.last["accel"] = MotionDelta(dx=dx, dy=dy, ts_ms=rx_ms, valid=True)
                 _accumulate(session, source="accel", dx=dx, dy=dy)
+            else:
+                session.last["accel"] = MotionDelta(dx=0.0, dy=0.0, ts_ms=rx_ms, valid=False)
         if session.enabled.get("gyro"):
             delta = session.gyro.process_sample(msg.raw)
             delta = _rotate(delta, session.screen_angle_deg)
-            session.last["gyro"] = delta
             if delta.valid:
                 dx, dy = _scale_move("gyro", delta)
+                session.last["gyro"] = MotionDelta(dx=dx, dy=dy, ts_ms=rx_ms, valid=True)
                 _accumulate(session, source="gyro", dx=dx, dy=dy)
+            else:
+                session.last["gyro"] = MotionDelta(dx=0.0, dy=0.0, ts_ms=rx_ms, valid=False)
         if session.enabled.get("orientation"):
             delta = session.orientation.process_sample(msg.raw)
             delta = _rotate(delta, session.screen_angle_deg)
-            session.last["orientation"] = delta
             if delta.valid:
                 dx, dy = _scale_move("orientation", delta)
+                session.last["orientation"] = MotionDelta(dx=dx, dy=dy, ts_ms=rx_ms, valid=True)
                 _accumulate(session, source="orientation", dx=dx, dy=dy)
+            else:
+                session.last["orientation"] = MotionDelta(dx=0.0, dy=0.0, ts_ms=rx_ms, valid=False)
         return
 
     if msg.t == "cam.frame":
@@ -374,11 +376,13 @@ async def _handle_binary_message(
         return
 
     delta = session.vision.process_bgr(frame)
+    rx_ms = time.monotonic() * 1000.0
     cam_delta = MotionDelta(dx=delta.dx, dy=delta.dy, ts_ms=ts_ms, valid=delta.valid)
-    session.last["camera"] = cam_delta
+    cam_delta = _rotate(cam_delta, session.screen_angle_deg)
     if not cam_delta.valid:
+        session.last["camera"] = MotionDelta(dx=0.0, dy=0.0, ts_ms=rx_ms, valid=False)
         return
 
-    cam_delta = _rotate(cam_delta, session.screen_angle_deg)
     dx, dy = _scale_move("camera", cam_delta)
+    session.last["camera"] = MotionDelta(dx=dx, dy=dy, ts_ms=rx_ms, valid=True)
     _accumulate(session, source="camera", dx=dx, dy=dy)

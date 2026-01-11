@@ -30,11 +30,13 @@ class AccelTracker:
         friction: float = 0.86,
         hp_tau_s: float = 0.35,
         deadzone_mps2: float = 0.08,
+        start_mps2: float = 0.22,
     ) -> None:
         self._accel_gain = accel_gain
         self._friction = friction
         self._hp_tau_s = hp_tau_s
         self._deadzone_mps2 = deadzone_mps2
+        self._start_mps2 = start_mps2
         self._vx = 0.0
         self._vy = 0.0
         self._last_ts_ms: float | None = None
@@ -103,6 +105,13 @@ class AccelTracker:
         self._prev_ay = ay_f
 
         if self._deadzone_mps2 > 0 and math.hypot(ax_in, ay_in) < self._deadzone_mps2:
+            ax_in = 0.0
+            ay_in = 0.0
+
+        # When we're effectively at rest, ignore sub-threshold acceleration. This prevents
+        # the common "bounce-back" where decel/noise after a hard stop produces a small
+        # opposite-sign delta once the velocity estimate has been clamped to zero.
+        if self._vx == 0.0 and self._vy == 0.0 and self._start_mps2 > 0 and math.hypot(ax_in, ay_in) < self._start_mps2:
             ax_in = 0.0
             ay_in = 0.0
 
