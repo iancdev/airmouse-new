@@ -29,6 +29,68 @@ DEFAULT_SMOOTHING_HALF_LIFE_MS = 80.0
 DEFAULT_DEADZONE_PX = 0.25
 MAX_STEP_PX = 120.0
 
+import socket
+
+def get_local_ip():
+    try:
+        # Create a dummy socket to find the local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+@dataclass
+class DashboardState:
+    server_running: bool = True
+    client_connected: bool = False
+    port: int = 8000
+    protocol: str = "WebSocket"
+    session_id: str = "0pixna"  # Placeholder, could be dynamic
+    mouse_x: float = 0.0
+    mouse_y: float = 0.0
+    last_click: str = "None"
+    local_ip: str = field(default_factory=get_local_ip)
+
+class DashboardManager:
+    def __init__(self):
+        self.dashboards: set[WebSocket] = set()
+        self.state = DashboardState()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.dashboards.add(ws)
+        await self.broadcast_state()
+
+    def disconnect(self, ws: WebSocket):
+        self.dashboards.remove(ws)
+
+    async def broadcast_state(self):
+        if not self.dashboards:
+            return
+        msg = json.dumps({"t": "dashboard.state", "state": self.state.__dict__})
+        for ws in list(self.dashboards):
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                self.dashboards.remove(ws)
+
+    async def update_client_connection(self, connected: bool):
+        self.state.client_connected = connected
+        await self.broadcast_state()
+
+    async def update_mouse_activity(self, x: float, y: float, click: str | None = None):
+        self.state.mouse_x = x
+        self.state.mouse_y = y
+        if click:
+            self.state.last_click = click
+        await self.broadcast_state()
+
+dashboard_manager = DashboardManager()
+
 def create_app(*, static_dir: Path | None) -> FastAPI:
     app = FastAPI(title="AirMouse")
 
@@ -38,6 +100,7 @@ def create_app(*, static_dir: Path | None) -> FastAPI:
     async def ws_endpoint(ws: WebSocket) -> None:
         await ws.accept()
         session = ClientSession()
+        await dashboard_manager.update_client_connection(True)
         _start_motion_thread(mouse, session)
         try:
             while True:
@@ -55,7 +118,17 @@ def create_app(*, static_dir: Path | None) -> FastAPI:
             except Exception:
                 pass
         finally:
+            await dashboard_manager.update_client_connection(False)
             _stop_motion_thread(session)
+
+    @app.websocket("/dashboard-ws")
+    async def dashboard_ws_endpoint(ws: WebSocket) -> None:
+        await dashboard_manager.connect(ws)
+        try:
+            while True:
+                await ws.receive_text()  # Keep connection alive
+        except WebSocketDisconnect:
+            dashboard_manager.disconnect(ws)
 
     if static_dir is not None and static_dir.exists():
         # Next.js static export expects to be served at the origin root.
@@ -173,6 +246,9 @@ def _stop_motion_thread(session: ClientSession) -> None:
 def _motion_loop(mouse: MouseController, session: ClientSession) -> None:
     last_tick = time.monotonic()
 
+    import asyncio
+    loop = asyncio.new_event_loop()
+
     while not session.stop_event.is_set():
         interval = 1.0 / max(1.0, float(session.tick_hz))
         now = time.monotonic()
@@ -202,6 +278,15 @@ def _motion_loop(mouse: MouseController, session: ClientSession) -> None:
             session.last_out_dx = dx
             session.last_out_dy = dy
             mouse.move_relative(dx, dy)
+            # Notify dashboard
+            try:
+                # We are in a thread, need to run async broadcast
+                asyncio.run_coroutine_threadsafe(
+                    dashboard_manager.update_mouse_activity(dx, dy),
+                    asyncio.get_event_loop()
+                )
+            except Exception:
+                pass
 
 
 async def _handle_text_message(
@@ -298,11 +383,20 @@ async def _handle_text_message(
         return
 
     if msg.t == "input.click":
-        mouse.click(button=str(msg.raw.get("button")), state=str(msg.raw.get("state")))
+        button = str(msg.raw.get("button"))
+        state = str(msg.raw.get("state"))
+        mouse.click(button=button, state=state)
+        await dashboard_manager.update_mouse_activity(
+            session.last_out_dx, session.last_out_dy, click=f"{button} {state}"
+        )
         return
 
     if msg.t == "input.scroll":
-        mouse.scroll(float(msg.raw.get("delta", 0.0)) * session.sensitivity)
+        delta = float(msg.raw.get("delta", 0.0)) * session.sensitivity
+        mouse.scroll(delta)
+        await dashboard_manager.update_mouse_activity(
+            session.last_out_dx, session.last_out_dy, click=f"scroll {delta:.1f}"
+        )
         return
 
     if msg.t == "move.delta":
@@ -391,3 +485,4 @@ async def _handle_binary_message(
     dx, dy = _scale_move("camera", cam_delta)
     session.last["camera"] = MotionDelta(dx=dx, dy=dy, ts_ms=rx_ms, valid=True)
     _accumulate(session, source="camera", dx=dx, dy=dy)
+
