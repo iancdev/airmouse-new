@@ -46,6 +46,7 @@ export default function Home() {
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [cameraId, setCameraId] = useState<string>("");
+  const [mirrorCameraX, setMirrorCameraX] = useState(false);
 
   const scrollStartY = useRef<number | null>(null);
   const lastScrollY = useRef<number | null>(null);
@@ -171,8 +172,13 @@ export default function Home() {
 
       const targetW = 320;
       const targetH = Math.max(1, Math.round((vh / vw) * targetW));
-      canvas.width = targetW;
-      canvas.height = targetH;
+      if (canvas.width !== targetW) canvas.width = targetW;
+      if (canvas.height !== targetH) canvas.height = targetH;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (mirrorCameraX) {
+        ctx.translate(targetW, 0);
+        ctx.scale(-1, 1);
+      }
       ctx.drawImage(video, 0, 0, targetW, targetH);
 
       inFlight = true;
@@ -546,6 +552,22 @@ export default function Home() {
                 </option>
               ))}
             </select>
+            <label
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "center",
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid var(--border)",
+              }}
+            >
+              <input type="checkbox" checked={mirrorCameraX} onChange={(e) => setMirrorCameraX(e.target.checked)} disabled={!enabled.camera} />
+              <div>
+                <div style={{ fontWeight: 600 }}>Mirror camera (Y-axis)</div>
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>Flip left/right for camera tracking</div>
+              </div>
+            </label>
           </div>
 
           <div style={{ height: 16 }} />
