@@ -16,7 +16,7 @@ class MouseController:
     def __init__(self, config: MouseConfig | None = None) -> None:
         self._config = config or MouseConfig()
         self._lock = threading.Lock()
-        pyautogui.FAILSAFE = True
+        pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0
         if hasattr(pyautogui, "MINIMUM_DURATION"):
             pyautogui.MINIMUM_DURATION = 0

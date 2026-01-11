@@ -160,7 +160,7 @@ export default function Home() {
 
     let seq = 0;
     let inFlight = false;
-    const intervalMs = Math.max(10, Math.round(1000 / cameraFps));
+    const intervalMs = Math.max(4, 1000 / cameraFps);
 
     const intervalId = window.setInterval(() => {
       if (inFlight) return;
@@ -444,7 +444,7 @@ export default function Home() {
                 onChange={(e) => setCameraFps(Number(e.target.value))}
                 type="range"
                 min={5}
-                max={60}
+                max={240}
                 step={1}
               />
               <span style={{ color: "var(--muted)", fontSize: 12 }}>{cameraFps} fps</span>

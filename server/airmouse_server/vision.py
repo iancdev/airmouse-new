@@ -35,7 +35,7 @@ class VisionTracker:
         self._fb_thresh = fb_thresh
         self._prev_gray: np.ndarray | None = None
         self._prev_pts: np.ndarray | None = None
-        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self._clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 
     def reset(self) -> None:
         self._prev_gray = None

@@ -24,7 +24,7 @@ logger = logging.getLogger("airmouse")
 
 DEFAULT_ENABLED = {"camera": False, "accel": True, "gyro": False, "orientation": False}
 MOVE_SCALES = {"camera": 4.0, "accel": 220.0, "gyro": 18.0, "orientation": 4.0}
-DEFAULT_TICK_HZ = 60.0
+DEFAULT_TICK_HZ = 240.0
 DEFAULT_SMOOTHING_HALF_LIFE_MS = 80.0
 DEFAULT_DEADZONE_PX = 0.25
 MAX_STEP_PX = 120.0
